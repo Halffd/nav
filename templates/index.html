@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Navigator</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="web-navigator">
+        <div class="navigation-controls">
+            <button onclick="history.back()" id="backBtn">←</button>
+            <button onclick="history.forward()" id="forwardBtn">→</button>
+            <button onclick="location.reload()">↻</button>
+            <form id="urlForm" onsubmit="navigate(event)">
+                <input type="text" id="urlInput" value="{{.CurrentURL}}" placeholder="Enter URL">
+                <button type="submit">Go</button>
+            </form>
+        </div>
+        <div id="web-view-container" class="web-view">
+            {{if .Error}}
+                <div class="resource-error">{{.Error}}</div>
+            {{else}}
+                {{.Content}}
+            {{end}}
+        </div>
+    </div>
+
+    <script>
+        function navigate(event) {
+            event.preventDefault();
+            const url = document.getElementById('urlInput').value;
+            window.location.href = `/?url=${encodeURIComponent(url)}`;
+        }
+
+        // Update navigation buttons state
+        document.getElementById('backBtn').disabled = !window.history.length;
+        document.getElementById('forwardBtn').disabled = true;
+    </script>
+</body>
+</html> 
