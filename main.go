@@ -137,9 +137,7 @@ func (rp *ResourceProcessor) processJS(doc *goquery.Document) error {
 	doc.Find("script[src]").Each(func(i int, s *goquery.Selection) {
 		if src, exists := s.Attr("src"); exists {
 			// Keep YouTube player scripts and other essential external scripts
-			if strings.Contains(src, "youtube.com") || 
-			   strings.Contains(src, "www.google.com") ||
-			   strings.Contains(src, "apis.google.com") {
+			if strings.Contains(src, "youtube.com") {
 				s.SetAttr("src", rp.makeAbsoluteURL(src))
 				return
 			}
@@ -155,7 +153,7 @@ func (rp *ResourceProcessor) processJS(doc *goquery.Document) error {
 	})
 
 	// Process inline JavaScript
-	doc.Find("script:not([src])").Each(func(i int, s *goquery.Selection) {
+	doc.Find("script:not([src])").Each(func(i int, s *qqquery.Selection) {
 		js := s.Text()
 		// Skip if it contains YouTube player initialization
 		if strings.Contains(js, "youtube.com") || 
@@ -240,34 +238,45 @@ func (rp *ResourceProcessor) fetchAndMinifyJS(url string) (string, error) {
 	return minified, nil
 }
 
-// Add new function to check if site allows framing
-func canBeFramed(url string) (bool, error) {
-	resp, err := http.Head(url)
-	if err != nil {
-		return false, err
+// Add these new helper functions
+func extractVideoID(url string) string {
+	if strings.Contains(url, "youtube.com/watch?v=") {
+		return strings.Split(strings.Split(url, "watch?v=")[1], "&")[0]
+	} else if strings.Contains(url, "youtu.be/") {
+		return strings.Split(url, "youtu.be/")[1]
 	}
-	defer resp.Body.Close()
-
-	// Check X-Frame-Options header
-	if frameOptions := resp.Header.Get("X-Frame-Options"); frameOptions != "" {
-		frameOptions = strings.ToLower(frameOptions)
-		if frameOptions == "deny" || frameOptions == "sameorigin" {
-			return false, nil
-		}
-	}
-	return true, nil
+	return ""
 }
 
-// Add function to create redirect page for non-frameable sites
-func createRedirectPage(url string) template.HTML {
-	return template.HTML(`
-		<div class="redirect-warning">
-			<h2>External Site Redirect</h2>
-			<p>This site cannot be displayed in the navigator due to security restrictions.</p>
-			<p>You can visit it directly:</p>
-			<a href="` + url + `" target="_blank" class="redirect-button">Open ` + url + `</a>
-		</div>
-	`)
+func (rp *ResourceProcessor) processMeta(doc *goquery.Document) {
+	// Handle viewport meta
+	doc.Find("meta[name='viewport']").Remove()
+	doc.Find("head").PrependHtml(`<meta name="viewport" content="width=device-width, initial-scale=1.0">`)
+
+	// Handle charset
+	doc.Find("meta[charset]").Remove()
+	doc.Find("head").PrependHtml(`<meta charset="UTF-8">`)
+
+	// Handle CSP
+	doc.Find("meta[http-equiv='Content-Security-Policy']").Remove()
+}
+
+func (rp *ResourceProcessor) processHead(doc *goquery.Document) error {
+	// Process base tag
+	doc.Find("base").Each(func(i int, s *goquery.Selection) {
+		if href, exists := s.Attr("href"); exists {
+			s.SetAttr("href", rp.makeAbsoluteURL(href))
+		}
+	})
+
+	// Process favicons
+	doc.Find("link[rel='icon'], link[rel='shortcut icon']").Each(func(i int, s *goquery.Selection) {
+		if href, exists := s.Attr("href"); exists {
+			s.SetAttr("href", rp.makeAbsoluteURL(href))
+		}
+	})
+
+	return nil
 }
 
 func main() {
@@ -333,39 +342,53 @@ func main() {
 			url = "http://" + url
 		}
 
-		// Check if site can be framed
-		canFrame, err := canBeFramed(url)
-		if err != nil {
-			return c.Render("index", fiber.Map{
-				"Error": fmt.Sprintf("Error checking site: %v", err),
-			})
-		}
-
-		if !canFrame {
-			return c.Render("index", fiber.Map{
-				"CurrentURL": url,
-				"Content":    createRedirectPage(url),
-			})
-		}
-
 		// Special handling for YouTube URLs
 		if strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be") {
-			return c.Render("index", fiber.Map{
-				"CurrentURL": url,
-				"Content": template.HTML(`
-					<iframe 
-						width="100%" 
-						height="100%" 
-						src="` + url + `" 
-						frameborder="0" 
-						allowfullscreen="true"
-						allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture">
-					</iframe>
-				`),
-			})
+			videoID := extractVideoID(url)
+			if videoID != "" {
+				return c.Render("index", fiber.Map{
+					"CurrentURL": url,
+					"Content": template.HTML(`
+						<div class="video-container">
+							<iframe 
+								src="https://www.youtube.com/embed/` + videoID + `" 
+								frameborder="0" 
+								allowfullscreen="true"
+								allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture">
+							</iframe>
+						</div>
+					`),
+				})
+			}
 		}
 
-		resp, err := http.Get(url)
+		client := &http.Client{
+			Timeout: 10 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return fmt.Errorf("too many redirects")
+				}
+				return nil
+			},
+		}
+
+		// Add headers to bypass some restrictions
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return c.Render("index", fiber.Map{
+				"Error": fmt.Sprintf("Error creating request: %v", err),
+			})
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+		req.Header.Set("Sec-Fetch-Dest", "document")
+		req.Header.Set("Sec-Fetch-Mode", "navigate")
+		req.Header.Set("Sec-Fetch-Site", "none")
+		req.Header.Set("Sec-Fetch-User", "?1")
+		req.Header.Set("Upgrade-Insecure-Requests", "1")
+
+		resp, err := client.Do(req)
 		if err != nil {
 			return c.Render("index", fiber.Map{
 				"Error": fmt.Sprintf("Error fetching page: %v", err),
@@ -389,16 +412,34 @@ func main() {
 
 		processor := NewResourceProcessor(url)
 
-		// Process resources
+		// Process everything
+		processor.processMeta(doc)
+		processor.processHead(doc)
 		processor.processCSS(doc)
 		processor.processJS(doc)
 		processor.processImages(doc)
 		processor.processIframes(doc)
 
+		// Process forms
+		doc.Find("form").Each(func(i int, s *goquery.Selection) {
+			if action, exists := s.Attr("action"); exists {
+				if !strings.HasPrefix(action, "http") {
+					absoluteURL := processor.makeAbsoluteURL(action)
+					s.SetAttr("action", fmt.Sprintf("/?url=%s", absoluteURL))
+				} else {
+					s.SetAttr("action", fmt.Sprintf("/?url=%s", action))
+				}
+			}
+		})
+
 		// Process links
 		doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
 			href, exists := s.Attr("href")
 			if exists {
+				// Skip javascript: links and anchors
+				if strings.HasPrefix(href, "javascript:") || strings.HasPrefix(href, "#") {
+					return
+				}
 				if !strings.HasPrefix(href, "http") {
 					absoluteURL := processor.makeAbsoluteURL(href)
 					s.SetAttr("href", fmt.Sprintf("/?url=%s", absoluteURL))
